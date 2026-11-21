@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Микро-Гонка 2D</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#222; touch-action:none;
+    font-family:'Segoe UI',system-ui,sans-serif; user-select:none; -webkit-user-select:none; }
+  #game { position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  #hud { position:fixed; top:calc(8px + env(safe-area-inset-top)); left:10px; right:10px;
+    display:flex; justify-content:space-between; align-items:flex-start;
+    color:#fff; pointer-events:none; text-shadow:0 1px 3px rgba(0,0,0,.8); z-index:5; }
+  #hud .box { background:rgba(0,0,0,.35); border-radius:10px; padding:6px 12px; }
+  #lapT  { font-size:16px; font-weight:700; }
+  #posT  { font-size:16px; font-weight:700; margin-left:12px; }
+  #timeT { font-size:22px; font-weight:800; font-variant-numeric:tabular-nums; }
+  #bestT { font-size:12px; opacity:.85; font-variant-numeric:tabular-nums; }
+  #speedT{ position:fixed; right:12px; bottom:calc(96px + env(safe-area-inset-bottom));
+    font-size:20px; font-weight:800; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); z-index:5; }
+  #minimap { position:fixed; top:calc(8px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%);
+    width:130px; height:98px; border-radius:8px; opacity:.85; z-index:5; pointer-events:none; }
+
+  #controls { position:fixed; left:0; right:0; bottom:calc(10px + env(safe-area-inset-bottom));
+    display:flex; justify-content:space-between; padding:0 16px; z-index:6; }
+  .cluster { display:flex; gap:14px; }
+  .btn { width:72px; height:72px; border-radius:50%; background:rgba(255,255,255,.14);
+    border:2px solid rgba(255,255,255,.35); color:#fff; font-size:30px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; touch-action:none; }
+  .btn.big { width:84px; height:84px; background:rgba(80,200,120,.25); border-color:rgba(120,230,160,.5); }
+  .btn.small { width:60px; height:60px; font-size:22px; }
+  .btn.active { background:rgba(255,255,255,.35); }
+  body.desktop .btn { opacity:.55; }
+
+  #overlay { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; background:rgba(10,15,25,.72);
+    color:#fff; text-align:center; padding:20px; }
+  #overlay h1 { font-size:34px; letter-spacing:1px; }
+  #overlay p  { font-size:15px; opacity:.85; line-height:1.6; max-width:420px; }
+  #bigMsg { font-size:80px; font-weight:900; }
+  #startBtn, #restartBtn { display:none; pointer-events:auto; margin-top:8px;
+    background:#e63946; color:#fff; border:none; border-radius:12px; padding:14px 38px;
+    font-size:19px; font-weight:800; cursor:pointer; }
+  #restartBtn.show, #startBtn.show { display:block; }
+  #resetBtn { position:fixed; top:calc(8px + env(safe-area-inset-top)); right:12px; z-index:6;
+    width:42px; height:42px; border-radius:50%; border:2px solid rgba(255,255,255,.4);
+    background:rgba(0,0,0,.35); color:#fff; font-size:18px; touch-action:none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<canvas id="minimap" width="130" height="98"></canvas>
+
+<div id="hud">
+  <div class="box"><span id="lapT">LAP 1/3</span><span id="posT">4/4</span></div>
+  <div class="box" style="text-align:right"><div id="timeT">0.00</div><div id="bestT">BEST --</div></div>
+</div>
+<div id="speedT">0 км/ч</div>
+<button id="resetBtn" title="На трассу">⟳</button>
+
+<div id="controls">
+  <div class="cluster">
+    <div class="btn" id="btnL">◀</div>
+    <div class="btn" id="btnR">▶</div>
+  </div>
+  <div class="cluster">
+    <div class="btn small" id="btnB">⬇</div>
+    <div class="btn big" id="btnG">▲</div>
+  </div>
+</div>
+
+<div id="overlay">
+  <h1>МИКРО-ГОНКА</h1>
+  <p>ПК: стрелки или WASD.<br>Телефон: кнопки ◀ ▶ и газ/тормоз.<br>3 круга, 3 соперника. С травы — медленно!</p>
+  <div id="bigMsg"></div>
+  <button id="startBtn" class="show">СТАРТ</button>
+  <button id="restartBtn">ЕЩЁ РАЗ</button>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const mm = document.getElementById('minimap');
+const mmCtx = mm.getContext('2d');
+
+const WORLD_W = 2400, WORLD_H = 1800;
+const ROAD_W = 92;
+
+/* ---------- трасса: замкнутая кривая Catmull-Rom ---------- */
+const CONTROL = [
+  [420,1300],[300,950],[380,560],[700,340],[1100,270],[1500,330],
+  [1830,520],[2040,840],[1940,1180],[1600,1330],[1240,1210],[960,1270],
+  [830,1470],[640,1510]
+];
+
+const pts = [];
+{
+  const n = CONTROL.length, SEG = 26;
+  for (let i = 0; i < n; i++) {
+    const p0 = CONTROL[(i+n-1)%n], p1 = CONTROL[i], p2 = CONTROL[(i+1)%n], p3 = CONTROL[(i+2)%n];
+    for (let j = 0; j < SEG; j++) {
+      const t = j/SEG, t2 = t*t, t3 = t2*t;
+      pts.push({
+        x: .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+        y: .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+      });
+    }
+  }
+}
+const N = pts.length;
+const tang = [], norm = [];
+for (let i = 0; i < N; i++) {
+  const a = pts[(i+N-1)%N], b = pts[(i+1)%N];
+  let dx = b.x-a.x, dy = b.y-a.y;
+  const len = Math.hypot(dx,dy) || 1;
+  dx/=len; dy/=len;
+  tang.push({x:dx,y:dy});
+  norm.push({x:-dy,y:dx});
+}
+let trackLen = 0;
+for (let i = 0; i < N; i++) trackLen += Math.hypot(pts[(i+1)%N].x-pts[i].x, pts[(i+1)%N].y-pts[i].y);
+const AVG_SP = trackLen/N;
+function normAngle(a) { return ((a + Math.PI*3) % (Math.PI*2)) - Math.PI; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+/* ---------- предрендер трассы + маска покрытия ---------- */
+const trackCv = document.createElement('canvas');
+trackCv.width = WORLD_W; trackCv.height = WORLD_H;
+const maskCv = document.createElement('canvas');
+maskCv.width = WORLD_W; maskCv.height = WORLD_H;
+{
+  const g = trackCv.getContext('2d');
+  g.fillStyle = '#3d7a33';
+  g.fillRect(0,0,WORLD_W,WORLD_H);
+  g.strokeStyle = 'rgba(0,0,0,.06)';
+  g.lineWidth = 60;
+  for (let y = 0; y < WORLD_H; y += 120) {
+    g.beginPath(); g.moveTo(0,y); g.lineTo(WORLD_W,y); g.stroke();
+  }
+  const road = new Path2D();
+  road.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < N; i++) road.lineTo(pts[i].x, pts[i].y);
+  road.closePath();
+
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  g.strokeStyle = '#e8e8e8'; g.lineWidth = ROAD_W + 10; g.stroke(road);   // светлый край
+  g.strokeStyle = '#454a52'; g.lineWidth = ROAD_W;      g.stroke(road);   // асфальт
+  g.setLineDash([26,30]);
+  g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 3; g.stroke(road); // разметка
+  g.setLineDash([]);
+
+  for (let i = 0; i < 26; i++) {                                          // стартовая клетка
+    const p = pts[i], nrm = norm[i];
+    for (let k = -3; k <= 3; k++) {
+      const off = k * 13;
+      g.fillStyle = (i + k) % 2 ? '#ffffff' : '#222222';
+      g.save();
+      g.translate(p.x + nrm.x*off, p.y + nrm.y*off);
+      g.rotate(Math.atan2(tang[i].y, tang[i].x));
+      g.fillRect(-3.6, -7.5, 7.2, 15);
+      g.restore();
+    }
+  }
+
+  const m = maskCv.getContext('2d');
+  m.strokeStyle = '#ff0000'; m.lineJoin = 'round'; m.lineCap = 'round';
+  m.lineWidth = ROAD_W;
+  m.stroke(new Path2D(road));
+}
+const maskData = maskCv.getContext('2d').getImageData(0,0,WORLD_W,WORLD_H).data;
+function onRoad(x, y) {
+  const xi = x|0, yi = y|0;
+  if (xi < 0 || yi < 0 || xi >= WORLD_W || yi >= WORLD_H) return false;
+  return maskData[(yi*WORLD_W + xi)*4] > 100;
+}
+
+/* ---------- мини-карта (фон) ---------- */
+const mmBg = document.createElement('canvas');
+mmBg.width = 130; mmBg.height = 98;
+{
+  const s = Math.min(130/WORLD_W, 98/WORLD_H);
+  const g = mmBg.getContext('2d');
+  g.fillStyle = 'rgba(0,0,0,.4)'; g.fillRect(0,0,130,98);
+  g.save();
+  g.scale(s,s);
+  g.drawImage(trackCv,0,0);
+  g.restore();
+}
+const mmScale = Math.min(130/WORLD_W, 98/WORLD_H);
+
+/* ---------- машины ---------- */
+function makeRacer(color, gridSlot, isPlayer) {
+  const idx = (N - 12 - gridSlot*7 + N) % N;
+  const off = (gridSlot % 2 ? 1 : -1) * 22;
+  return {
+    isPlayer, color,
+    x: pts[idx].x + norm[idx].x*off,
+    y: pts[idx].y + norm[idx].y*off,
+    angle: Math.atan2(tang[idx].y, tang[idx].x),
+    speed: 0,
+    idx, lapProg: gridSlot*7, totalProg: -12 - gridSlot*7,
+    completed: 0, nextCp: 1,
+    lateral: off, vmax: isPlayer ? 0 : (300 + Math.random()*30),
+    lapStart: 0
+  };
+}
+const COLORS = ['#e63946','#4477dd','#f2c14e','#9b5de5'];
+let racers, player;
+let state = 'menu';                 // menu | countdown | race | finished
+let countdownT = 0, raceTime = 0;
+let bestLap = parseFloat(localStorage.getItem('racer_best')) || null;
+let finishedOrder = [];
+
+function resetRace() {
+  racers = [];
+  for (let i = 0; i < 3; i++) racers.push(makeRacer(COLORS[i+1], i, false));
+  player = makeRacer(COLORS[0], 3, true);
+  racers.push(player);
+  raceTime = 0; finishedOrder = [];
+  camX = player.x; camY = player.y;
+}
+
+/* ---------- ввод ---------- */
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (state === 'menu') startCountdown();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+
+const btnState = { L:false, R:false, G:false, B:false };
+function bindBtn(id, key) {
+  const el = document.getElementById(id);
+  const set = v => e => { e.preventDefault(); btnState[key] = v; el.classList.toggle('active', v); };
+  el.addEventListener('pointerdown', set(true));
+  el.addEventListener('pointerup', set(false));
+  el.addEventListener('pointercancel', set(false));
+  el.addEventListener('pointerleave', set(false));
+}
+bindBtn('btnL','L'); bindBtn('btnR','R'); bindBtn('btnG','G'); bindBtn('btnB','B');
+if (!('ontouchstart' in window)) document.body.classList.add('desktop');
+
+/* ---------- элементы HUD ---------- */
+const $ = id => document.getElementById(id);
+const overlay = $('overlay'), bigMsg = $('bigMsg');
+const startBtn = $('startBtn'), restartBtn = $('restartBtn');
+
+function startCountdown() {
+  resetRace();
+  state = 'countdown'; countdownT = 3.6;
+  overlay.style.display = 'none';
+}
+startBtn.addEventListener('click', startCountdown);
+restartBtn.addEventListener('click', startCountdown);
+$('resetBtn').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  let best = 0, bd = 1e18;
+  for (let i = 0; i < N; i++) {
+    const d = (pts[i].x-player.x)**2 + (pts[i].y-player.y)**2;
+    if (d < bd) { bd = d; best = i; }
+  }
+  player.x = pts[best].x; player.y = pts[best].y;
+  player.angle = Math.atan2(tang[best].y, tang[best].x);
+  player.speed = 0;
+});
+
+/* ---------- физика игрока ---------- */
+const MAXV = 340, MAXV_GRASS = 150;
+function updatePlayer(dt) {
+  const gas  = keys.ArrowUp || keys.KeyW || btnState.G;
+  const back = keys.ArrowDown || keys.KeyS || btnState.B;
+  const left = keys.ArrowLeft || keys.KeyA || btnState.L;
+  const right= keys.ArrowRight || keys.KeyD || btnState.R;
+  const steer = (right?1:0) - (left?1:0);
+
+  const onTrack = onRoad(player.x, player.y);
+  const vlim = onTrack ? MAXV : MAXV_GRASS;
+
+  if (state === 'race') {
+    if (back) player.speed -= 520*dt;
+    else if (gas) player.speed += (onTrack ? 330 : 200)*dt;
+    else player.speed -= 60*dt;
+  }
+  player.speed -= player.speed * (onTrack ? 0.55 : 1.6) * dt;
+  if (back && player.speed < 0) player.speed = Math.max(player.speed, -90);
+  player.speed = Math.max(Math.min(player.speed, vlim), -90);
+
+  const grip = Math.min(1, Math.abs(player.speed)/70);
+  player.angle += steer * 2.9 * grip * dt * (player.speed < 0 ? -1 : 1);
+
+  player.x += Math.cos(player.angle)*player.speed*dt;
+  player.y += Math.sin(player.angle)*player.speed*dt;
+  player.x = Math.max(20, Math.min(WORLD_W-20, player.x));
+  player.y = Math.max(20, Math.min(WORLD_H-20, player.y));
+}
+
+/* ---------- БИ ---------- */
+function updateAI(ai, dt) {
+  if (state !== 'race') return;
+  const i = Math.floor(ai.idx);
+  const l1 = (i + 16) % N, l2 = (i + 34) % N;
+  const a1 = Math.atan2(tang[i].y, tang[i].x);
+  const a2 = Math.atan2(pts[l2].y - pts[l1].y, pts[l2].x - pts[l1].x);
+  const curv = Math.abs(normAngle(a1 - a2));
+  let target = ai.vmax / (1 + curv*1.7);
+  const gap = ai.totalProg - player.totalProg;      // лёгкий rubber-band
+  if (gap > 400) target *= 0.9;
+  else if (gap < -400) target *= 1.1;
+  ai.speed += clamp((target - ai.speed)*3*dt, -500*dt, 600*dt);
+  ai.idx = (ai.idx + ai.speed*dt/AVG_SP + N) % N;
+  const j = Math.floor(ai.idx);
+  ai.x = pts[j].x + norm[j].x*ai.lateral;
+  ai.y = pts[j].y + norm[j].y*ai.lateral;
+  const tAng = Math.atan2(tang[j].y, tang[j].x);
+  ai.angle += normAngle(tAng - ai.angle) * Math.min(1, 12*dt);
+}
+
+/* ---------- круги, прогресс, позиции ---------- */
+const CP = [0.25, 0.5, 0.75];
+function updateProgress(r, dt, now) {
+  if (r.isPlayer) {
+    const near = nearestIdx(r.x, r.y, r.idx);
+    let d = near - r.idx;
+    if (d >  N/2) d -= N;
+    if (d < -N/2) d += N;
+    r.idx = (r.idx + d + N) % N;
+    r.totalProg += d;
+  } else {
+    r.totalProg = (r.completed + r.idx/N) * N - N;    // стартовая дистанция учтена ниже
+  }
+  if (r.finished) return;
+  const lapPos = r.totalProg;
+  if (r.nextCp <= 3 && lapPos >= r.completed*N + N*CP[r.nextCp-1]) r.nextCp++;
+  if (r.nextCp === 4 && lapPos >= (r.completed+1)*N) {
+    r.nextCp = 1; r.completed++;
+    if (r.isPlayer) {
+      const lapT = now - r.lapStart;
+      r.lapStart = now;
+      if (r.completed < 3) flash('КРУГ ' + r.completed + '/3 ✓  ' + lapT.toFixed(2) + 'с');
+      if (!bestLap || lapT < bestLap) { bestLap = lapT; localStorage.setItem('racer_best', bestLap); }
+      if (r.completed >= 3) finishRacer(r, now);
+    } else {
+      finishRacer(r, now);
+    }
+  }
+  if (r.isPlayer && r.completed >= 3) finishRacer(r, now);
+}
+function finishRacer(r, now) {
+  if (r.finished) return;
+  r.finished = true;
+  finishedOrder.push(r);
+  if (r.isPlayer) showResults();
+}
+function nearestIdx(x, y, hint) {
+  let bi = hint, bd = 1e18;
+  for (let k = -18; k <= 18; k++) {
+    const i = (hint + k + N) % N;
+    const d = (pts[i].x-x)**2 + (pts[i].y-y)**2;
+    if (d < bd) { bd = d; bi = i; }
+  }
+  return bi;
+}
+function rankOf(r) {
+  let rank = 1;
+  const rPos = r.finished ? 1e9 + finishedOrder.indexOf(r) : r.totalProg;
+  for (const o of racers) {
+    if (o === r) continue;
+    const oPos = o.finished ? 1e9 + finishedOrder.indexOf(o) : o.totalProg;
+    if (oPos > rPos) rank++;
+  }
+  return rank;
+}
+
+/* ---------- столкновения игрок-БИ ---------- */
+function separateCars() {
+  for (const o of racers) {
+    if (o === player) continue;
+    const dx = player.x-o.x, dy = player.y-o.y;
+    const d = Math.hypot(dx,dy);
+    if (d < 30 && d > 0.01) {
+      const push = (30-d)/2;
+      player.x += dx/d*push; player.y += dy/d*push;
+      player.speed *= 0.92;
+    }
+  }
+}
+
+/* ---------- камера и отрисовка ---------- */
+let camX = 0, camY = 0, flashT = 0, flashTxt = '';
+function flash(txt) { flashTxt = txt; flashT = 1.6; }
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = innerWidth*dpr; canvas.height = innerHeight*dpr;
+  canvas.style.width = innerWidth+'px'; canvas.style.height = innerHeight+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener('resize', resize);
+resize();
+
+function drawCar(r) {
+  ctx.save();
+  ctx.translate(r.x, r.y);
+  ctx.rotate(r.angle);
+  ctx.fillStyle = 'rgba(0,0,0,.3)';
+  ctx.beginPath(); ctx.roundRect(-18, -9+3, 36, 18, 5); ctx.fill();
+  ctx.fillStyle = r.color;
+  ctx.beginPath(); ctx.roundRect(-18, -9, 36, 18, 5); ctx.fill();
+  ctx.fillStyle = 'rgba(20,30,45,.85)';
+  ctx.beginPath(); ctx.roundRect(2, -6.5, 9, 13, 2); ctx.fill();       // стекло
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  ctx.fillRect(-19, -10, 5, 5); ctx.fillRect(-19, 5, 5, 5);            // шины
+  ctx.fillStyle = '#fdf5ae';
+  ctx.fillRect(16, -7, 3, 4); ctx.fillRect(16, 3, 3, 4);               // фары
+  ctx.restore();
+}
+
+function render(now) {
+  const cw = innerWidth, ch = innerHeight;
+  ctx.clearRect(0,0,cw,ch);
+  const zoom = Math.max(0.55, Math.min(1.4, Math.min(cw,ch)/620));
+
+  camX += (player.x + Math.cos(player.angle)*player.speed*0.25 - camX) * 0.12;
+  camY += (player.y + Math.sin(player.angle)*player.speed*0.25 - camY) * 0.12;
+
+  ctx.save();
+  ctx.translate(cw/2, ch/2);
+  ctx.scale(zoom, zoom);
+  ctx.translate(-camX, -camY);
+  ctx.drawImage(trackCv, 0, 0);
+  const order = racers.slice().sort((a,b)=>a.y-b.y);
+  for (const r of order) drawCar(r);
+  ctx.restore();
+
+  mmCtx.clearRect(0,0,130,98);
+  mmCtx.drawImage(mmBg,0,0);
+  for (const r of racers) {
+    if (r === player) continue;
+    mmCtx.fillStyle = r.color;
+    mmCtx.fillRect(r.x*mmScale-1.5, r.y*mmScale-1.5, 3, 3);
+  }
+  mmCtx.fillStyle = '#fff';
+  mmCtx.beginPath();
+  mmCtx.arc(player.x*mmScale, player.y*mmScale, 2.6, 0, 7);
+  mmCtx.fill();
+
+  if (flashT > 0) {
+    ctx.font = '800 30px Segoe UI, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,' + Math.min(1, flashT) + ')';
+    ctx.fillText(flashTxt, cw/2, ch*0.32);
+  }
+}
+
+/* ---------- HUD ---------- */
+function updateHud(now) {
+  $('lapT').textContent = 'LAP ' + Math.min(player.completed+1,3) + '/3';
+  $('posT').textContent = rankOf(player) + '/4';
+  $('timeT').textContent = raceTime.toFixed(2);
+  $('speedT').textContent = Math.abs(Math.round(player.speed*0.53)) + ' км/ч';
+  $('bestT').textContent = bestLap ? 'BEST ' + bestLap.toFixed(2) : 'BEST --';
+}
+
+function showResults() {
+  state = 'finished';
+  overlay.style.display = 'flex';
+  const place = finishedOrder.indexOf(player) + 1;
+  $('overlay h1').style.display = 'none';
+  $('overlay p').style.display = 'none';
+  startBtn.classList.remove('show');
+  restartBtn.classList.add('show');
+  bigMsg.style.fontSize = '54px';
+  bigMsg.style.whiteSpace = 'pre-line';
+  bigMsg.textContent = (place === 1 ? '🏆 ПОБЕДА!' : place + '-Е МЕСТО') +
+    (bestLap ? '\nЛучший круг: ' + bestLap.toFixed(2) + 'с' : '');
+}
+
+/* ---------- главный цикл ---------- */
+let last = performance.now();
+function loop(nowMs) {
+  const now = nowMs/1000;
+  const dt = Math.min(0.05, now - last);
+  last = now;
+
+  if (state === 'countdown') {
+    countdownT -= dt;
+    overlay.style.display = 'flex';
+    $('overlay h1').style.display = '';
+    $('overlay p').style.display = 'none';
+    startBtn.classList.remove('show'); restartBtn.classList.remove('show');
+    bigMsg.style.fontSize = '80px';
+    const c = Math.ceil(countdownT - 0.6);
+    bigMsg.textContent = c > 0 ? c : 'ПОЕХАЛИ!';
+    if (countdownT <= 0) {
+      state = 'race';
+      overlay.style.display = 'none';
+      player.elapsedBase = now;
+      for (const r of racers) r.lapStart = now;
+    }
+  }
+
+  if (state === 'race' || state === 'finished') {
+    if (state === 'race') raceTime += dt;
+    updatePlayer(dt);
+    for (const r of racers) {
+      if (r.isPlayer) continue;
+      if (r.finished) aiCoast(r, dt);
+      else updateAI(r, dt);
+      updateProgress(r, dt, now);
+    }
+    separateCars();
+    updateProgress(player, dt, now);
+    if (flashT > 0) flashT -= dt;
+  }
+
+  if (state !== 'menu') { render(now); updateHud(now); }
+  requestAnimationFrame(loop);
+}
+
+function aiCoast(r, dt) {
+  r.speed += (0 - r.speed) * 2 * dt;
+  r.x += Math.cos(r.angle)*r.speed*dt;
+  r.y += Math.sin(r.angle)*r.speed*dt;
+}
+
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
